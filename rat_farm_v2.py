@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from adb_controller import ADBController
 from screen_capture import ScreenCapture
 from template_matcher import TemplateMatcher, imread_unicode
-from ocr_recognizer import OCRRecognizer
+# from ocr_recognizer import OCRRecognizer  # 暂时屏蔽OCR
 
 
 class RatFarmV2:
@@ -211,9 +211,14 @@ class RatFarmV2:
 
     @property
     def ocr(self):
-        """懒加载OCR识别器"""
+        """懒加载OCR识别器（暂时屏蔽）"""
         if self._ocr is None:
-            self._ocr = OCRRecognizer()
+            # 创建一个模拟OCR对象，不实际加载PaddleOCR
+            class MockOCR:
+                available = False
+                def recognize_text(self, *args, **kwargs):
+                    return []
+            self._ocr = MockOCR()
         return self._ocr
 
     def ts(self) -> str:
@@ -1850,17 +1855,9 @@ class RatFarmV2:
                         print(f"    [跃迁前] 防御模块距上次点击{elapsed:.0f}s，执行点击 ({cx}, {cy})")
                         self.click_defense_module(cx, cy)
 
-            # 5. 等待44秒（后台预启动OCR）
-            print(f"    等待 {self.warp_wait} 秒（后台启动OCR）...")
-            import threading
-            ocr_ready = threading.Event()
-            def preload_ocr():
-                _ = self.ocr
-                ocr_ready.set()
-            ocr_thread = threading.Thread(target=preload_ocr, daemon=True)
-            ocr_thread.start()
+            # 5. 等待44秒（OCR已暂时屏蔽）
+            print(f"    等待 {self.warp_wait} 秒...")
             time.sleep(self.random_wait(self.warp_wait))
-            ocr_ready.wait()  # 等待OCR初始化完成
 
             # 检察官异常特殊流程：点击加速轨道和激活按钮
             if self.inspector_mode:
