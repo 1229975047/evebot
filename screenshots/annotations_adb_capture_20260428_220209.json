@@ -1,0 +1,17 @@
+{
+  "screenshot": "c:\\Users\\12299\\Documents\\trae_projects\\evebot\\screenshots\\adb_capture_20260428_220209.png",
+  "resolution": {
+    "width": 3200,
+    "height": 2136
+  },
+  "annotations": [
+    {
+      "x1": 3009,
+      "y1": 1880,
+      "x2": 3143,
+      "y2": 2025,
+      "name": "旗舰损控"
+    }
+  ],
+  "timestamp": "20260428_220441"
+}

@@ -1,0 +1,7 @@
+# EVE Bot 工业船检测数据集
+path: c:\Users\12299\Documents\trae_projects\evebot\dataset
+train: images
+val: images
+
+nc: 1
+names: ['enemy_monster']
