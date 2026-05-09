@@ -29,7 +29,6 @@ from typing import Optional, Tuple, List, Dict
 # 过滤libpng警告（cv2.imread读取PNG时的iCCP警告，不影响功能）
 warnings.filterwarnings('ignore', message='.*iCCP.*')
 os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
-cv2.setLogLevel(0)
 
 sys.path.insert(0, os.path.dirname(__file__))
 from adb_controller import ADBController
@@ -95,6 +94,7 @@ class RatFarmV2:
             'defense_module': 'mods/equip_defense_module.png',
             'fire_control': 'mods/equip_fire_control.png',
             'cap_energy': 'mods/equip_cap_Energy.png',
+            'salvager': 'mods/equip_salvager.png',  # 打捞器
 
             # 敌对目标（新标注）
             'enemy_1': 'mods/new_enemies/enemy_1.png',  # 挑战隐匿
@@ -515,8 +515,8 @@ class RatFarmV2:
         if result:
             self.tap_with_offset(result['center_x'], result['center_y'], offset=10)
 
-            # 离站后20秒点击指定坐标
-            wait_before_click = 20
+            # 离站后29秒点击指定坐标
+            wait_before_click = 29
             remaining_wait = self.undock_wait - wait_before_click
             print(f"    等待 {wait_before_click} 秒后点击指定坐标...")
             time.sleep(wait_before_click)
@@ -934,6 +934,15 @@ class RatFarmV2:
                 prog = self.detect_ring_progress(ss3, cx, cy)
                 if prog >= 0:
                     print(f"[装备]   掠能器进度: {prog*100:.0f}%")
+            time.sleep(1)
+
+        # 打捞器 - 跃迁落地后首次点击
+        salvager_results = self.find_all_template('salvager')
+        print(f"[装备] 打捞器 x{len(salvager_results)}")
+        for r in salvager_results:
+            cx, cy = int(r['center_x']), int(r['center_y'])
+            print(f"[装备]   点击 ({cx}, {cy})")
+            self.tap_with_offset(cx, cy, offset=10)
             time.sleep(1)
 
         self.equipment_clicked_this_warp = True

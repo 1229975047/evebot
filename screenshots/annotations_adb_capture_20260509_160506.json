@@ -1,0 +1,17 @@
+{
+  "screenshot": "c:\\Users\\DELL\\Desktop\\evebot1\\evebot\\screenshots\\adb_capture_20260509_160506.png",
+  "resolution": {
+    "width": 3200,
+    "height": 2139
+  },
+  "annotations": [
+    {
+      "x1": 2655,
+      "y1": 1705,
+      "x2": 2774,
+      "y2": 1837,
+      "name": "打捞器"
+    }
+  ],
+  "timestamp": "20260509_160548"
+}
