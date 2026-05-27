@@ -1,3 +1,7 @@
 opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
+
+# YOLO目标检测（可选，训练和推理需要）
+# 安装: pip install ultralytics
+# ultralytics>=8.0.0

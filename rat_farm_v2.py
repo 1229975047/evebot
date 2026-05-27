@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from adb_controller import ADBController
 from screen_capture import ScreenCapture
 from template_matcher import TemplateMatcher, imread_unicode
+from yolo_detector import YOLODetector
 # from ocr_recognizer import OCRRecognizer  # 暂时屏蔽OCR
 
 
@@ -54,7 +55,8 @@ class RatFarmV2:
         self.matcher = TemplateMatcher()
         self._ocr = None  # 懒加载OCR
 
-        # 截图保存目录
+        self.yolo = self._init_yolo()
+
         self.screenshot_dir = os.path.join(os.path.dirname(__file__), "screenshots")
         os.makedirs(self.screenshot_dir, exist_ok=True)
 
@@ -64,7 +66,7 @@ class RatFarmV2:
         self.scale_y = self.actual_height / self.REFERENCE_HEIGHT
         print(f"\n[分辨率] 参考: {self.REFERENCE_WIDTH}x{self.REFERENCE_HEIGHT}, 实际: {self.actual_width}x{self.actual_height}, 缩放: ({self.scale_x:.3f}, {self.scale_y:.3f})")
 
-        # 模板路径映射
+        # 模板路径映射（必须在 validate_scaling 之前定义，因为验证需要用到）
         self.templates = {
             # 离站检测
             'undock_btn': 'mods/undock_btn.png',
@@ -133,6 +135,10 @@ class RatFarmV2:
             'status_loss': 'mods/status_loss.png',
             'status_health': 'mods/status_health.png',
         }
+        
+        # 验证缩放准确性（templates 已定义，可以安全调用）
+        if not self.validate_scaling():
+            print(f"[警告] 分辨率验证失败，坐标可能不准确")
 
         # 敌对目标检测区域 (x1, y1, x2, y2)
         self.enemy_detection_region = (649, 20, 2395, 247)
@@ -224,6 +230,25 @@ class RatFarmV2:
     def ts(self) -> str:
         """返回当前时间戳字符串"""
         return datetime.now().strftime("%H:%M:%S")
+
+    def _init_yolo(self) -> Optional[YOLODetector]:
+        """初始化YOLO检测器（如果模型存在）"""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, 'yolo_models', 'eve_detector.pt')
+        if os.path.exists(model_path):
+            try:
+                detector = YOLODetector(model_path=model_path, confidence=0.5, device='cpu')
+                if detector.is_loaded:
+                    print(f"[YOLO] 模型加载成功: {model_path}")
+                    print(f"[YOLO] 类别数: {len(detector.get_class_names())}")
+                    return detector
+                else:
+                    print(f"[YOLO] 模型加载失败，回退到模板匹配模式")
+            except Exception as e:
+                print(f"[YOLO] 初始化异常: {e}，回退到模板匹配模式")
+        else:
+            print(f"[YOLO] 模型不存在: {model_path}，使用模板匹配模式")
+        return None
 
     def detect_resolution(self) -> Tuple[int, int]:
         """检测设备实际分辨率"""
@@ -356,6 +381,73 @@ class RatFarmV2:
         """获取缩放后的区域坐标"""
         return self.scale_coords_from_list(region)
 
+    def safe_slice(self, screenshot: np.ndarray, region: Tuple[int, int, int, int]):
+        """
+        安全切片区域，防止越界崩溃
+
+        Args:
+            screenshot: 截图数组
+            region: (x1, y1, x2, y2) 原始坐标
+
+        Returns:
+            切片后的图像数组，或 None（如果切片无效）
+        """
+        x1, y1, x2, y2 = region
+        h, w = screenshot.shape[:2]
+        x1_c = max(0, min(int(x1), w))
+        y1_c = max(0, min(int(y1), h))
+        x2_c = max(0, min(int(x2), w))
+        y2_c = max(0, min(int(y2), h))
+        if x2_c <= x1_c or y2_c <= y1_c:
+            return None
+        return screenshot[y1_c:y2_c, x1_c:x2_c]
+
+    def validate_scaling(self) -> bool:
+        """
+        使用 UI 锚点验证缩放是否准确（自动测量 + 相对位置验证）
+
+        原理：
+        1. 截图当前屏幕
+        2. 在全图匹配锚点模板（undock_btn, sidebar_toggle）
+        3. 如果是首次运行（参考分辨率或scale≈1.0），记录锚点实际位置作为参考
+        4. 否则，验证锚点位置是否符合预期缩放位置（允许±10%偏差）
+
+        返回: True=验证通过, False=验证失败
+        """
+        anchors = ['undock_btn', 'sidebar_toggle']
+        screenshot = self.capture_and_cache()
+        if screenshot is None:
+            print(f"    [验证] 无法获取截图")
+            return False
+
+        for anchor_name in anchors:
+            result = self.find_template(anchor_name, screenshot=screenshot)
+            if result:
+                actual_x, actual_y = result['center_x'], result['center_y']
+                if not hasattr(self, '_reference_anchor_positions'):
+                    self._reference_anchor_positions = {}
+
+                # 首次测量（参考分辨率）或强制更新
+                if anchor_name not in self._reference_anchor_positions or abs(self.scale_x - 1.0) < 0.01:
+                    self._reference_anchor_positions[anchor_name] = (actual_x, actual_y)
+                    print(f"    [验证] 锚点 '{anchor_name}' 位置记录: ({actual_x}, {actual_y})")
+                else:
+                    # 验证：计算预期位置 = 参考位置 × scale
+                    ref_x, ref_y = self._reference_anchor_positions[anchor_name]
+                    expected_x = int(ref_x * self.scale_x)
+                    expected_y = int(ref_y * self.scale_y)
+                    # 计算偏差
+                    dx = abs(actual_x - expected_x) / (self.actual_width or 1)
+                    dy = abs(actual_y - expected_y) / (self.actual_height or 1)
+                    deviation = (dx + dy) / 2 * 100  # 百分比
+
+                    if deviation > 10:
+                        print(f"    [验证] 锚点 '{anchor_name}' 偏差过大: 预期({expected_x},{expected_y}), 实际({actual_x},{actual_y}), 偏差{deviation:.1f}%")
+                        return False
+                    else:
+                        print(f"    [验证] 锚点 '{anchor_name}' 偏差 {deviation:.1f}% - 通过")
+        return True
+
     def get_screenshot(self) -> Optional[str]:
         """获取当前截图（保存到文件，仅用于调试）"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -461,37 +553,65 @@ class RatFarmV2:
             return True
 
     def find_template(self, name: str, screenshot=None) -> Optional[Dict]:
-        """查找单个模板"""
+        """查找单个模板（YOLO优先，自适应模板匹配兜底）"""
         if name not in self.templates:
             return None
 
         if screenshot is None:
             screenshot = self.load_screenshot()
-        if screenshot is None:
+        if screenshot is None or screenshot.size == 0:
             return None
+        if len(screenshot.shape) < 2:
+            return None
+
+        if self.yolo and self.yolo.is_loaded:
+            yolo_result = self.yolo.detect_single(screenshot, name, confidence=self.TEMPLATE_THRESHOLD)
+            if yolo_result:
+                return yolo_result
 
         path = self.templates[name]
         if not os.path.exists(path):
             return None
 
-        result = self.matcher.find_template(screenshot, path, threshold=self.TEMPLATE_THRESHOLD)
+        screenshot_aspect = self.actual_width / self.actual_height if self.actual_height > 0 else 1.5
+
+        result = self.matcher.find_template_adaptive(
+            screenshot, path,
+            threshold=self.TEMPLATE_THRESHOLD,
+            screenshot_aspect_ratio=screenshot_aspect
+        )
+
         return result
 
     def find_all_template(self, name: str, screenshot=None) -> List[Dict]:
-        """查找所有匹配的模板"""
+        """查找所有匹配的模板（YOLO优先，多尺度匹配兜底）"""
         if name not in self.templates:
             return []
 
         if screenshot is None:
             screenshot = self.load_screenshot()
-        if screenshot is None:
+        if screenshot is None or screenshot.size == 0:
             return []
+        if len(screenshot.shape) < 2:
+            return []
+
+        if self.yolo and self.yolo.is_loaded:
+            yolo_results = self.yolo.detect_all(screenshot, name, confidence=self.TEMPLATE_THRESHOLD * 0.9)
+            if yolo_results:
+                return yolo_results
 
         path = self.templates[name]
         if not os.path.exists(path):
             return []
 
-        return self.matcher.find_all_matches(screenshot, path, threshold=self.TEMPLATE_THRESHOLD)
+        results = self.matcher.find_all_matches_multiscale(
+            screenshot, path,
+            threshold=self.TEMPLATE_THRESHOLD * 0.9,
+            scale_range=(0.3, 2.0),
+            scale_steps=20
+        )
+
+        return results
 
     def is_in_station(self, screenshot=None) -> bool:
         """检测是否在空间站内"""
@@ -515,8 +635,8 @@ class RatFarmV2:
         if result:
             self.tap_with_offset(result['center_x'], result['center_y'], offset=10)
 
-            # 离站后29秒点击指定坐标
-            wait_before_click = 29
+            # 离站后20秒点击指定坐标
+            wait_before_click = 20
             remaining_wait = self.undock_wait - wait_before_click
             print(f"    等待 {wait_before_click} 秒后点击指定坐标...")
             time.sleep(wait_before_click)
@@ -589,21 +709,37 @@ class RatFarmV2:
         print("步骤: 在异常区域点击异常图标筛选")
         print("=" * 50)
 
-        x1, y1, x2, y2 = self.inspector_special_region
+        x1, y1, x2, y2 = self.get_scaled_region(self.inspector_special_region)
         screenshot = self.capture_and_cache()
-        if screenshot is not None:
-            region_screenshot = screenshot[y1:y2, x1:x2]
-            result = self.find_template('anomaly_filter_btn', screenshot=region_screenshot)
-            if result:
-                actual_x = result['center_x'] + x1
-                actual_y = result['center_y'] + y1
-                print(f"    [点击] 异常筛选按钮 at ({result['center_x']}, {result['center_y']}) → 实际({actual_x}, {actual_y})")
-                self.tap_with_offset(actual_x, actual_y, offset=5)
-                time.sleep(1)
-            else:
-                print(f"    异常筛选按钮未找到")
-        else:
+
+        # 校验截图有效性
+        if screenshot is None:
             print(f"    获取截图失败")
+            return
+        if screenshot.size == 0:
+            print(f"    截图数据为空")
+            return
+        h, w = screenshot.shape[:2]
+
+        # 校验区域坐标有效性（防止设备差异导致越界）
+        if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x2 <= x1 or y2 <= y1:
+            print(f"    区域坐标无效: ({x1}, {y1}, {x2}, {y2}) vs 截图尺寸({w}, {h})")
+            return
+
+        region_screenshot = self.safe_slice(screenshot, (x1, y1, x2, y2))
+        if region_screenshot is None or region_screenshot.size == 0:
+            print(f"    切片区域为空")
+            return
+
+        result = self.find_template('anomaly_filter_btn', screenshot=region_screenshot)
+        if result:
+            actual_x = result['center_x'] + x1
+            actual_y = result['center_y'] + y1
+            print(f"    [点击] 异常筛选按钮 at ({result['center_x']}, {result['center_y']}) → 实际({actual_x}, {actual_y})")
+            self.tap_with_offset(actual_x, actual_y, offset=5)
+            time.sleep(1)
+        else:
+            print(f"    异常筛选按钮未找到")
 
     def step_check_in_anomaly_space(self) -> bool:
         """检测是否已在异常空间中（通过敌对怪物+一键锁定判断）
@@ -821,18 +957,19 @@ class RatFarmV2:
         # 3.5 等待4秒后重新查找并点击异常图标筛选
         print(f"    [3.5/5] 等待4秒后点击异常图标筛选...")
         time.sleep(self.random_wait(4))
-        x1, y1, x2, y2 = self.inspector_special_region
+        x1, y1, x2, y2 = self.get_scaled_region(self.inspector_special_region)
         screenshot = self.capture_and_cache()
         if screenshot is not None:
-            region_screenshot = screenshot[y1:y2, x1:x2]
-            filter_result = self.find_template('anomaly_filter_btn', screenshot=region_screenshot)
-            if filter_result:
-                actual_x = filter_result['center_x'] + x1
-                actual_y = filter_result['center_y'] + y1
-                print(f"        异常筛选按钮 at ({filter_result['center_x']}, {filter_result['center_y']}) → 实际({actual_x}, {actual_y})")
-                self.tap_with_offset(actual_x, actual_y, offset=5)
-            else:
-                print(f"        异常筛选按钮未找到")
+            region_screenshot = self.safe_slice(screenshot, (x1, y1, x2, y2))
+            if region_screenshot is not None:
+                filter_result = self.find_template('anomaly_filter_btn', screenshot=region_screenshot)
+                if filter_result:
+                    actual_x = filter_result['center_x'] + x1
+                    actual_y = filter_result['center_y'] + y1
+                    print(f"        异常筛选按钮 at ({filter_result['center_x']}, {filter_result['center_y']}) → 实际({actual_x}, {actual_y})")
+                    self.tap_with_offset(actual_x, actual_y, offset=5)
+                else:
+                    print(f"        异常筛选按钮未找到")
         time.sleep(1)
 
         # 4. 等待44秒后开始正式战斗流程
@@ -1794,11 +1931,12 @@ class RatFarmV2:
             anomaly_found = self.step_click_anomaly()
             if not anomaly_found:
                 print(f"    [{self.ts()}] [警告] 未找到异常模板，尝试点击异常图标筛选...")
-                x1, y1, x2, y2 = self.inspector_special_region
+                x1, y1, x2, y2 = self.get_scaled_region(self.inspector_special_region)
                 screenshot = self.capture_and_cache()
                 if screenshot is not None:
-                    region_screenshot = screenshot[y1:y2, x1:x2]
-                    filter_result = self.find_template('anomaly_filter_btn', screenshot=region_screenshot)
+                    region_screenshot = self.safe_slice(screenshot, (x1, y1, x2, y2))
+                    if region_screenshot is not None:
+                        filter_result = self.find_template('anomaly_filter_btn', screenshot=region_screenshot)
                     if filter_result:
                         actual_x = filter_result['center_x'] + x1
                         actual_y = filter_result['center_y'] + y1
